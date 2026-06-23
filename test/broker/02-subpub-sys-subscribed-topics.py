@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-# Test $SYS/broker/subscribed_topics/<filter> subscriber counts.
+# Test $SYS/broker/subscribed_topics/<filter> subscriber counts. +, # and % in
+# filters are percent-encoded in the $SYS topic.
 
 from mosq_test_helper import *
 
@@ -12,8 +13,23 @@ def write_config(filename, port):
         f.write("allow_anonymous true\n")
         f.write("sys_interval 0\n")
 
+def encode(topic_filter):
+    return topic_filter.replace("%", "%25").replace("+", "%2B").replace("#", "%23")
+
 def count_publish(topic_filter, count, retain=False):
-    return mosq_test.gen_publish(PREFIX + topic_filter, qos=0, retain=retain, payload=str(count))
+    return mosq_test.gen_publish(PREFIX + encode(topic_filter), qos=0, retain=retain, payload=str(count))
+
+def expect_large_packet(sock, name, expected):
+    # mosq_test.expect_packet() does a single recv(), which can return only
+    # part of a large packet.
+    recvd = b""
+    while len(recvd) < len(expected):
+        chunk = sock.recv(len(expected) - len(recvd))
+        if not chunk:
+            break
+        recvd += chunk
+    if not mosq_test.packet_matches(name, recvd, expected):
+        raise mosq_test.TestError
 
 def connect(client_id, port):
     connect_packet = mosq_test.gen_connect(client_id, keepalive=60)
@@ -28,6 +44,10 @@ def do_test(port):
     rc = 1
     monitor_filter = PREFIX + "#"
     long_filter = "l/" + "x"*(65535 - len(PREFIX))
+    # Fits as is, but not once the # is encoded
+    long_encoded_filter = "l/" + "y"*(65535 - len(PREFIX) - 5) + "/#"
+    # Exactly the longest allowed topic name once encoded
+    max_filter = "l/" + "z"*(65535 - len(PREFIX) - 6) + "/#"
 
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
 
@@ -49,7 +69,15 @@ def do_test(port):
         mosq_test.expect_packet(sock_m, "x/y 1", count_publish("x/y", 1))
         # Too long for an MQTT topic name once prefixed, so not reported
         subscribe(sock_a, 5, long_filter)
+        subscribe(sock_a, 10, long_encoded_filter)
         mosq_test.do_ping(sock_m, "no long filter count")
+        subscribe(sock_a, 13, max_filter)
+        expect_large_packet(sock_m, "max length 1", count_publish(max_filter, 1))
+        # Wildcards and % are percent-encoded
+        subscribe(sock_a, 11, "a/+/#")
+        mosq_test.expect_packet(sock_m, "a/+/# 1", count_publish("a/+/#", 1))
+        subscribe(sock_a, 12, "50%/x")
+        mosq_test.expect_packet(sock_m, "50%/x 1", count_publish("50%/x", 1))
 
         sock_b = connect("sys-client-b", port)
         subscribe(sock_b, 6, "a/b")
@@ -79,6 +107,9 @@ def do_test(port):
         sock_a.close()
         mosq_test.expect_packet(sock_m, "a//b 0", count_publish("a//b", 0))
         mosq_test.expect_packet(sock_m, "x/y 0", count_publish("x/y", 0))
+        expect_large_packet(sock_m, "max length 0", count_publish(max_filter, 0))
+        mosq_test.expect_packet(sock_m, "a/+/# 0", count_publish("a/+/#", 0))
+        mosq_test.expect_packet(sock_m, "50%/x 0", count_publish("50%/x", 0))
         mosq_test.do_ping(sock_m, "nothing more after a leaves")
 
         sock_c.close()

@@ -203,12 +203,15 @@ static void sub__remove_shared_leaf(struct mosquitto__subhier *subhier, struct m
 #define SUBSCRIBED_TOPICS_PREFIX "$SYS/broker/subscribed_topics/"
 
 /* Publish the number of clients subscribed to a filter as a retained message
- * on $SYS/broker/subscribed_topics/<filter>. */
+ * on $SYS/broker/subscribed_topics/<filter>.
+ *
+ * Wildcards aren't allowed in a topic name, so +, # and % in the filter are
+ * percent-encoded as %2B, %23 and %25. */
 static void sub__update_subscribed_topics(const char *filter, const struct mosquitto__subhier *hier)
 {
 	struct mosquitto__subleaf *leaf;
 	char *topic;
-	size_t prefix_len, filter_len;
+	size_t prefix_len, topic_len, i, pos;
 	char payload[12];
 	int payloadlen;
 	unsigned int count = 0;
@@ -220,15 +223,38 @@ static void sub__update_subscribed_topics(const char *filter, const struct mosqu
 	}
 
 	prefix_len = strlen(SUBSCRIBED_TOPICS_PREFIX);
-	filter_len = strlen(filter);
-	if(prefix_len + filter_len > UINT16_MAX){
+	topic_len = prefix_len;
+	for(i=0; filter[i]; i++){
+		if(filter[i] == '+' || filter[i] == '#' || filter[i] == '%'){
+			topic_len += 3;
+		}else{
+			topic_len++;
+		}
+	}
+	if(topic_len > UINT16_MAX){
 		/* Too long to be an MQTT topic name. */
 		return;
 	}
-	topic = mosquitto__malloc(prefix_len + filter_len + 1);
+	topic = mosquitto__malloc(topic_len + 1);
 	if(!topic) return;
 	memcpy(topic, SUBSCRIBED_TOPICS_PREFIX, prefix_len);
-	memcpy(&topic[prefix_len], filter, filter_len + 1);
+	pos = prefix_len;
+	for(i=0; filter[i]; i++){
+		if(filter[i] == '+'){
+			memcpy(&topic[pos], "%2B", 3);
+			pos += 3;
+		}else if(filter[i] == '#'){
+			memcpy(&topic[pos], "%23", 3);
+			pos += 3;
+		}else if(filter[i] == '%'){
+			memcpy(&topic[pos], "%25", 3);
+			pos += 3;
+		}else{
+			topic[pos] = filter[i];
+			pos++;
+		}
+	}
+	topic[pos] = '\0';
 
 	payloadlen = snprintf(payload, sizeof(payload), "%u", count);
 	db__messages_easy_queue(NULL, topic, 0, (uint32_t)payloadlen, payload, 1, 0, NULL);
