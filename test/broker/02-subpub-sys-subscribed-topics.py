@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 
-# Test $SYS/broker/subscribed_topics/<filter> subscriber counts. +, # and % in
-# filters are percent-encoded in the $SYS topic.
+# Test $SYS/broker/subscribed_topics/<filter> subscriber counts, published when
+# sys_subscribed_topics is true. +, # and % in filters are percent-encoded in
+# the $SYS topic.
 
 from mosq_test_helper import *
+import signal
 
 PREFIX = "$SYS/broker/subscribed_topics/"
 
-def write_config(filename, port):
+CONF_FILE = os.path.basename(__file__).replace('.py', '.conf')
+
+def write_config(filename, port, options):
     with open(filename, 'w') as f:
         f.write("listener %d\n" % (port))
         f.write("allow_anonymous true\n")
-        f.write("sys_interval 0\n")
+        for option in options:
+            f.write("%s\n" % (option))
 
 def encode(topic_filter):
     return topic_filter.replace("%", "%25").replace("+", "%2B").replace("#", "%23")
@@ -49,7 +54,8 @@ def do_test(port):
     # Exactly the longest allowed topic name once encoded
     max_filter = "l/" + "z"*(65535 - len(PREFIX) - 6) + "/#"
 
-    broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
+    write_config(CONF_FILE, port, ["sys_subscribed_topics true"])
+    broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
 
     try:
         sock_m = connect("sys-monitor", port)
@@ -118,6 +124,7 @@ def do_test(port):
     except mosq_test.TestError:
         pass
     finally:
+        os.remove(CONF_FILE)
         broker.terminate()
         broker.wait()
         (stdo, stde) = broker.communicate()
@@ -125,11 +132,9 @@ def do_test(port):
             print(stde.decode('utf-8'))
             exit(rc)
 
-def do_test_sys_interval_0(port):
+def do_test_disabled(port, options, reason):
     rc = 1
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
-    write_config(conf_file, port)
-
+    write_config(CONF_FILE, port, options)
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
 
     try:
@@ -138,7 +143,7 @@ def do_test_sys_interval_0(port):
         subscribe(sock_m, 1, PREFIX + "#")
         sock_a = connect("sys-client-a", port)
         subscribe(sock_a, 2, "a/b")
-        mosq_test.do_ping(sock_m, "no counts with sys_interval 0")
+        mosq_test.do_ping(sock_m, "no counts: %s" % (reason))
 
         sock_a.close()
         sock_m.close()
@@ -146,7 +151,7 @@ def do_test_sys_interval_0(port):
     except mosq_test.TestError:
         pass
     finally:
-        os.remove(conf_file)
+        os.remove(CONF_FILE)
         broker.terminate()
         broker.wait()
         (stdo, stde) = broker.communicate()
@@ -154,7 +159,45 @@ def do_test_sys_interval_0(port):
             print(stde.decode('utf-8'))
             exit(rc)
 
+def do_test_reload(port):
+    rc = 1
+    write_config(CONF_FILE, port, ["sys_subscribed_topics true"])
+    broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
+
+    try:
+        sock_m = connect("sys-monitor", port)
+        subscribe(sock_m, 1, "$SYS/broker/subscribed_topics/a/#")
+
+        # sys_subscribed_topics isn't reloaded, and isn't affected by
+        # sys_interval changing on reload
+        write_config(CONF_FILE, port, ["sys_subscribed_topics false", "sys_interval 0"])
+        broker.send_signal(signal.SIGHUP)
+        mosq_test.do_ping(sock_m, "after reload")
+
+        sock_a = connect("sys-client-a", port)
+        subscribe(sock_a, 2, "a/b")
+        mosq_test.expect_packet(sock_m, "a/b 1 after reload", count_publish("a/b", 1))
+
+        sock_a.close()
+        sock_m.close()
+        rc = 0
+    except mosq_test.TestError:
+        pass
+    finally:
+        os.remove(CONF_FILE)
+        broker.terminate()
+        broker.wait()
+        (stdo, stde) = broker.communicate()
+        if rc == 0 and b"Reloading config." not in stde:
+            print("FAIL: broker did not reload its config")
+            rc = 1
+        if rc:
+            print(stde.decode('utf-8'))
+            exit(rc)
+
 port = mosq_test.get_port()
 do_test(port)
-do_test_sys_interval_0(port)
+do_test_disabled(port, [], "disabled by default")
+do_test_disabled(port, ["sys_subscribed_topics true", "sys_interval 0"], "sys_interval 0")
+do_test_reload(port)
 exit(0)

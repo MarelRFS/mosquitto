@@ -216,7 +216,7 @@ static void sub__update_subscribed_topics(const char *filter, const struct mosqu
 	int payloadlen;
 	unsigned int count = 0;
 
-	if(db.config->sys_interval == 0) return;
+	if(!db.config->sys_subscribed_topics) return;
 
 	for(leaf = hier->subs; leaf; leaf = leaf->next){
 		count++;

@@ -294,6 +294,7 @@ struct mosquitto__config {
 	int retain_expiry_interval;
 	bool set_tcp_nodelay;
 	int sys_interval;
+	bool sys_subscribed_topics;
 	bool upgrade_outgoing_qos;
 	char *user;
 #ifdef WITH_WEBSOCKETS
