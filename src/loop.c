@@ -241,7 +241,9 @@ int mosquitto_main_loop(struct mosquitto__listener_sock *listensock, int listens
 			log__close(db.config);
 			log__init(db.config);
 			keepalive__cleanup();
-			keepalive__init();
+			if(keepalive__init()){
+				log__printf(NULL, MOSQ_LOG_ERR, "Error: Unable to allocate keepalive list on reload, keepalive checking is disabled until the next reload.");
+			}
 			flag_reload = false;
 		}
 		if(flag_tree_print){
