@@ -50,6 +50,7 @@ Contributors:
 #include "time_mosq.h"
 #include "tls_mosq.h"
 #include "util_mosq.h"
+#include "alias_mosq.h"
 #include "will_mosq.h"
 
 #ifdef WITH_BRIDGE
@@ -57,43 +58,415 @@ Contributors:
 static void bridge__backoff_step(struct mosquitto *context);
 static void bridge__backoff_reset(struct mosquitto *context);
 
+static void bridge__start_new(int first);
+
 void bridge__start_all(void)
 {
-	int i;
+	bridge__start_new(0);
+}
 
-	for(i=0; i<db.config->bridge_count; i++){
-		if(bridge__new(&(db.config->bridges[i])) > 0){
+
+static bool bridge__str_eq(const char *a, const char *b)
+{
+	if(a == NULL && b == NULL) return true;
+	if(a == NULL || b == NULL) return false;
+	return strcmp(a, b) == 0;
+}
+
+
+/* Compare the configuration of a running bridge with a freshly parsed one.
+ * Only configuration is compared; fields that the bridge mutates at runtime
+ * (cur_address, restart_t, lazy_reconnect, protocol downgrade, backoff jitter
+ * in restart_timeout, resolved clean_start_local, ...) are ignored or
+ * compared via their configured equivalents. */
+static bool bridge__config_equal(const struct mosquitto__bridge *old_bridge, const struct mosquitto__bridge *new_bridge)
+{
+	int i;
+	int8_t old_csl, new_csl;
+
+	if(old_bridge->address_count != new_bridge->address_count) return false;
+	for(i=0; i<old_bridge->address_count; i++){
+		if(!bridge__str_eq(old_bridge->addresses[i].address, new_bridge->addresses[i].address)) return false;
+		if(old_bridge->addresses[i].port != new_bridge->addresses[i].port) return false;
+	}
+
+	if(old_bridge->topic_count != new_bridge->topic_count) return false;
+	for(i=0; i<old_bridge->topic_count; i++){
+		if(!bridge__str_eq(old_bridge->topics[i].topic, new_bridge->topics[i].topic)) return false;
+		if(!bridge__str_eq(old_bridge->topics[i].local_prefix, new_bridge->topics[i].local_prefix)) return false;
+		if(!bridge__str_eq(old_bridge->topics[i].remote_prefix, new_bridge->topics[i].remote_prefix)) return false;
+		if(old_bridge->topics[i].direction != new_bridge->topics[i].direction) return false;
+		if(old_bridge->topics[i].qos != new_bridge->topics[i].qos) return false;
+	}
+
+	if(!bridge__str_eq(old_bridge->remote_clientid, new_bridge->remote_clientid)) return false;
+	if(!bridge__str_eq(old_bridge->remote_username, new_bridge->remote_username)) return false;
+	if(!bridge__str_eq(old_bridge->remote_password, new_bridge->remote_password)) return false;
+	if(!bridge__str_eq(old_bridge->local_clientid, new_bridge->local_clientid)) return false;
+	if(!bridge__str_eq(old_bridge->local_username, new_bridge->local_username)) return false;
+	if(!bridge__str_eq(old_bridge->local_password, new_bridge->local_password)) return false;
+	if(!bridge__str_eq(old_bridge->notification_topic, new_bridge->notification_topic)) return false;
+	if(!bridge__str_eq(old_bridge->bind_address, new_bridge->bind_address)) return false;
+
+	if(old_bridge->round_robin != new_bridge->round_robin) return false;
+	if(old_bridge->try_private != new_bridge->try_private) return false;
+	if(old_bridge->clean_start != new_bridge->clean_start) return false;
+	old_csl = old_bridge->clean_start_local == -1 ? (int8_t)old_bridge->clean_start : old_bridge->clean_start_local;
+	new_csl = new_bridge->clean_start_local == -1 ? (int8_t)new_bridge->clean_start : new_bridge->clean_start_local;
+	if(old_csl != new_csl) return false;
+	if(old_bridge->keepalive != new_bridge->keepalive) return false;
+	if(old_bridge->protocol_version_cfg != new_bridge->protocol_version_cfg) return false;
+	if(old_bridge->notifications != new_bridge->notifications) return false;
+	if(old_bridge->notifications_local_only != new_bridge->notifications_local_only) return false;
+	if(old_bridge->start_type != new_bridge->start_type) return false;
+	if(old_bridge->idle_timeout != new_bridge->idle_timeout) return false;
+	if(old_bridge->backoff_base != new_bridge->backoff_base) return false;
+	if(old_bridge->backoff_cap != new_bridge->backoff_cap) return false;
+	/* With backoff enabled restart_timeout holds the current jittered value. */
+	if(new_bridge->backoff_cap == 0 && old_bridge->restart_timeout != new_bridge->restart_timeout) return false;
+	if(old_bridge->threshold != new_bridge->threshold) return false;
+	if(old_bridge->maximum_packet_size != new_bridge->maximum_packet_size) return false;
+	if(old_bridge->attempt_unsubscribe != new_bridge->attempt_unsubscribe) return false;
+	if(old_bridge->outgoing_retain != new_bridge->outgoing_retain) return false;
+
+#ifdef WITH_TLS
+	if(old_bridge->tls_insecure != new_bridge->tls_insecure) return false;
+	if(old_bridge->tls_ocsp_required != new_bridge->tls_ocsp_required) return false;
+	if(!bridge__str_eq(old_bridge->tls_cafile, new_bridge->tls_cafile)) return false;
+	if(!bridge__str_eq(old_bridge->tls_capath, new_bridge->tls_capath)) return false;
+	if(!bridge__str_eq(old_bridge->tls_certfile, new_bridge->tls_certfile)) return false;
+	if(!bridge__str_eq(old_bridge->tls_keyfile, new_bridge->tls_keyfile)) return false;
+	if(!bridge__str_eq(old_bridge->tls_version, new_bridge->tls_version)) return false;
+	if(!bridge__str_eq(old_bridge->tls_alpn, new_bridge->tls_alpn)) return false;
+#ifdef FINAL_WITH_TLS_PSK
+	if(!bridge__str_eq(old_bridge->tls_psk_identity, new_bridge->tls_psk_identity)) return false;
+	if(!bridge__str_eq(old_bridge->tls_psk, new_bridge->tls_psk)) return false;
+#endif
+#endif
+	return true;
+}
+
+
+/* Stop and remove live bridges that are no longer in new_cfg, or whose
+ * configuration differs from new_cfg (those are then re-added as new bridges
+ * by bridge__merge_new()). */
+static void bridge__remove_stale(struct mosquitto__config *new_cfg, struct mosquitto__config *live)
+{
+	int i, j;
+	struct mosquitto__bridge *bridge, *new_bridge;
+	struct mosquitto *context;
+
+	for(i=live->bridge_count-1; i>=0; i--){
+		bridge = live->bridges[i];
+		new_bridge = NULL;
+		for(j=0; j<new_cfg->bridge_count; j++){
+			if(!strcmp(bridge->name, new_cfg->bridges[j]->name)){
+				new_bridge = new_cfg->bridges[j];
+				break;
+			}
+		}
+		if(new_bridge && bridge__config_equal(bridge, new_bridge)){
+			continue;
+		}
+		if(new_bridge){
+			log__printf(NULL, MOSQ_LOG_INFO, "Bridge %s configuration changed, restarting.", bridge->name);
+		}else{
+			log__printf(NULL, MOSQ_LOG_INFO, "Bridge %s removed from config, stopping.", bridge->name);
+		}
+
+		for(j=0; j<db.bridge_count; j++){
+			context = db.bridges[j];
+			if(context && context->bridge == bridge){
+				bridge__destroy(context);
+				break;
+			}
+		}
+		config__bridge_free(bridge);
+		config__bridge_remove(live, i);
+	}
+}
+
+
+/* Move bridges from src that are not already configured in dest (matched by
+ * connection name) into dest, and free the rest. bridge__remove_stale() has
+ * already removed changed or deleted bridges from dest, and
+ * config__check_bridges() has already rejected local_clientid clashes within
+ * src. The caller must have reserved room in dest for all of src's bridges
+ * with config__reserve_bridges(), so this cannot fail part way through. Takes
+ * ownership of src's bridges. */
+static void bridge__merge_new(struct mosquitto__config *src, struct mosquitto__config *dest)
+{
+	int i, j;
+	bool present;
+
+	for(i=0; i<src->bridge_count; i++){
+		present = false;
+		for(j=0; j<dest->bridge_count; j++){
+			if(!strcmp(src->bridges[i]->name, dest->bridges[j]->name)){
+				present = true;
+				break;
+			}
+		}
+		if(!present && dest->bridge_count >= dest->bridge_capacity){
+			/* Cannot happen if the caller reserved capacity; don't leave a
+			 * bridge in the config that was never started. */
+			log__printf(NULL, MOSQ_LOG_ERR, "Error: No room for bridge \"%s\", ignoring.", src->bridges[i]->name);
+			present = true;
+		}
+		if(present){
+			config__bridge_free(src->bridges[i]);
+		}else{
+			dest->bridges[dest->bridge_count] = src->bridges[i];
+			dest->bridge_count++;
+		}
+		src->bridges[i] = NULL;
+	}
+	mosquitto__free(src->bridges);
+	src->bridges = NULL;
+	src->bridge_count = 0;
+	src->bridge_capacity = 0;
+}
+
+
+/* Start bridges from index first onwards in db.config->bridges; those before
+ * it are already running and must not be touched. Used at startup (first=0)
+ * and for bridges appended by a reload. */
+static void bridge__start_new(int first)
+{
+	int i;
+	int rc;
+	struct mosquitto *context;
+
+	for(i=first; i<db.config->bridge_count; i++){
+		context = NULL;
+		rc = bridge__new(db.config->bridges[i], &context);
+		if(context == NULL){
+			/* bridge__new() failed before creating or publishing a context, so
+			 * nothing references this bridge config. Drop it from the live
+			 * config so the next reload sees it as new and tries again,
+			 * rather than skipping it by name forever (this also applies at
+			 * startup). Once a context exists
+			 * and is tracked in db.bridges (even if the connect attempt
+			 * failed with e.g. MOSQ_ERR_NOMEM), it must be kept: bridge_check()
+			 * retries it and it owns pointers into this config. */
+			log__printf(NULL, MOSQ_LOG_ERR, "Error: Unable to create bridge %s (%s), it will be retried on the next reload.",
+					db.config->bridges[i]->name, mosquitto_strerror(rc));
+			config__bridge_free(db.config->bridges[i]);
+			config__bridge_remove(db.config, i);
+			i--;
+			continue;
+		}
+		if(rc > 0){
 			log__printf(NULL, MOSQ_LOG_WARNING, "Warning: Unable to connect to bridge %s.",
-					db.config->bridges[i].name);
+					db.config->bridges[i]->name);
+		}
+		/* bridge__register_local_connections() only runs before the main loop,
+		 * so register the socket with the mux here if a connection is up or
+		 * pending. If not connected, bridge_check() will retry and register. */
+		if(context->sock != INVALID_SOCKET){
+			if(mux__add_in(context)){
+				log__printf(NULL, MOSQ_LOG_ERR, "Error registering new bridge %s: %s",
+						db.config->bridges[i]->name, strerror(errno));
+			}else{
+				mux__add_out(context);
+			}
 		}
 	}
 }
 
 
-int bridge__new(struct mosquitto__bridge *bridge)
+/* Apply a reloaded bridge configuration to the running set. Bridges are
+ * matched by connection name: removed and changed bridges are stopped and
+ * freed, new (and changed) ones are appended to live and started, unchanged
+ * ones are left running. new_cfg must already have passed
+ * config__validate_bridges() and config__check_bridges(). On success the
+ * bridges of new_cfg have been consumed; on failure nothing has been changed
+ * and the caller still owns them. */
+int bridge__reload(struct mosquitto__config *new_cfg, struct mosquitto__config *live)
+{
+	int rc;
+	int first_new;
+
+	/* Reserve room for the worst case (every parsed bridge is new) before any
+	 * running bridge is torn down, so the merge cannot fail and leave the
+	 * live set partially updated. */
+	rc = config__reserve_bridges(live, live->bridge_count + new_cfg->bridge_count);
+	if(rc) return rc;
+
+	bridge__remove_stale(new_cfg, live);
+	first_new = live->bridge_count;
+	bridge__merge_new(new_cfg, live);
+	/* Start the newly committed bridges right away, before the caller does
+	 * any further fallible processing, so that nothing is ever left
+	 * committed but unstarted. */
+	if(first_new < live->bridge_count){
+		bridge__start_new(first_new);
+	}
+	return MOSQ_ERR_SUCCESS;
+}
+
+
+/* Stop a running bridge and free its context. The bridge config struct
+ * (context->bridge) is left for the caller to remove from db.config->bridges
+ * and free with config__bridge_free(). Used when a bridge is removed from, or
+ * changed in, the config file and the broker is reloaded. */
+void bridge__destroy(struct mosquitto *context)
+{
+	struct mosquitto__bridge *bridge;
+	char *notification_topic;
+	size_t notification_topic_len;
+
+	if(!context || !context->bridge) return;
+	bridge = context->bridge;
+
+	log__printf(NULL, MOSQ_LOG_INFO, "Stopping bridge connection %s.", bridge->name);
+
+	if(bridge->primary_retry_sock != INVALID_SOCKET){
+		COMPAT_CLOSE(bridge->primary_retry_sock);
+		bridge->primary_retry_sock = INVALID_SOCKET;
+	}
+
+	/* Don't publish a retained '0' will for a bridge that no longer exists;
+	 * instead clear the retained state message locally. The remote broker
+	 * will still publish our will when the socket closes. */
+	will__clear(context);
+	if(bridge->notifications && bridge->remote_clientid){
+		if(bridge->notification_topic){
+			db__messages_easy_queue(NULL, bridge->notification_topic, 0, 0, NULL, 1, 0, NULL);
+		}else{
+			notification_topic_len = strlen(bridge->remote_clientid)+strlen("$SYS/broker/connection//state");
+			notification_topic = mosquitto__malloc(sizeof(char)*(notification_topic_len+1));
+			if(notification_topic){
+				snprintf(notification_topic, notification_topic_len+1, "$SYS/broker/connection/%s/state", bridge->remote_clientid);
+				db__messages_easy_queue(NULL, notification_topic, 0, 0, NULL, 1, 0, NULL);
+				mosquitto__free(notification_topic);
+			}
+		}
+	}
+
+	if(context->sock != INVALID_SOCKET){
+		mux__delete(context);
+	}
+	session_expiry__remove(context);
+	will_delay__remove(context);
+
+#if defined(__GLIBC__) && defined(WITH_ADNS)
+	if(context->adns){
+		/* An asynchronous DNS lookup may still be running in a resolver
+		 * thread that writes into context->adns. Unlike at shutdown, the
+		 * broker keeps running after a reload, so we must not free the
+		 * request until it has completed or been cancelled. */
+		if(gai_cancel(context->adns) == EAI_NOTCANCELED){
+			const struct gaicb *list[1];
+
+			list[0] = context->adns;
+			log__printf(NULL, MOSQ_LOG_INFO, "Waiting for DNS lookup of bridge %s to finish before stopping it.", bridge->name);
+			while(gai_suspend(list, 1, NULL) == EAI_INTR){
+			}
+		}
+		if(gai_error(context->adns) == 0 && context->adns->ar_result){
+			freeaddrinfo(context->adns->ar_result);
+		}
+		mosquitto__free((struct addrinfo *)context->adns->ar_request);
+		mosquitto__free(context->adns);
+		context->adns = NULL;
+	}
+#endif
+
+	/* Calls bridge__cleanup() (clears the db.bridges slot), closes the
+	 * socket, discards the session and queued messages, and frees context. */
+	context__cleanup(context, true);
+}
+
+
+int bridge__new(struct mosquitto__bridge *bridge, struct mosquitto **context_out)
 {
 	struct mosquitto *new_context = NULL;
 	struct mosquitto **bridges;
 	char *local_id;
+	int slot;
+	bool in_use;
 
 	assert(bridge);
+	if(context_out) *context_out = NULL;
 
 	local_id = mosquitto__strdup(bridge->local_clientid);
+	if(!local_id){
+		return MOSQ_ERR_NOMEM;
+	}
 
 	HASH_FIND(hh_id, db.contexts_by_id, local_id, strlen(local_id), new_context);
 	if(new_context){
-		/* (possible from persistent db) */
+		/* A context with this id already exists. At startup this is a session
+		 * restored from the persistence file, which we take over. At reload
+		 * time it may instead be a connected ordinary client, or another
+		 * running bridge, using this id. Taking over a live context would
+		 * leave its socket registered in the mux and socket hash while
+		 * bridge__connect() resets it, so refuse without touching it. The
+		 * bridge is dropped from the config by the caller and retried on the
+		 * next reload. */
+		in_use = (new_context->sock != INVALID_SOCKET || new_context->bridge != NULL);
+#ifdef WITH_WEBSOCKETS
+		if(new_context->wsi) in_use = true;
+#endif
+		if(in_use){
+			log__printf(NULL, MOSQ_LOG_ERR, "Error: Unable to start bridge %s, its local_clientid '%s' is in use by a connected client.",
+					bridge->name, local_id);
+			mosquitto__free(local_id);
+			return MOSQ_ERR_INVAL;
+		}
+	}
+
+	/* Reserve the db.bridges slot before creating or publishing the context,
+	 * so that a failure below leaves no context that references this bridge
+	 * without being tracked in db.bridges. Reuse a slot freed by
+	 * bridge__destroy() if there is one. */
+	for(slot=0; slot<db.bridge_count; slot++){
+		if(db.bridges[slot] == NULL){
+			break;
+		}
+	}
+	if(slot == db.bridge_count){
+		bridges = mosquitto__realloc(db.bridges, (size_t)(db.bridge_count+1)*sizeof(struct mosquitto *));
+		if(!bridges){
+			mosquitto__free(local_id);
+			return MOSQ_ERR_NOMEM;
+		}
+		db.bridges = bridges;
+		db.bridges[slot] = NULL;
+		db.bridge_count++;
+	}
+
+	if(new_context){
+		/* Take over the disconnected session (possible from persistent db, or
+		 * at reload a client that has since disconnected). Drop the state the
+		 * old client left behind before this context becomes a bridge: it
+		 * must not expire while the bridge runs, must not publish the
+		 * client's will, and its credentials are replaced by the bridge's. */
+		session_expiry__remove(new_context);
+		will_delay__remove(new_context);
+		will__clear(new_context);
+		alias__free_all(new_context);
+		/* max_qos came from the client's listener; a bridge is limited only
+		 * by what the remote grants in its CONNACK. */
+		new_context->max_qos = 2;
+		mosquitto__free(new_context->username);
+		new_context->username = NULL;
+		mosquitto__free(new_context->password);
+		new_context->password = NULL;
 		mosquitto__free(local_id);
 	}else{
 		/* id wasn't found, so generate a new context */
 		new_context = context__init(INVALID_SOCKET);
 		if(!new_context){
+			/* The reserved slot stays NULL, which every user of db.bridges skips. */
 			mosquitto__free(local_id);
 			return MOSQ_ERR_NOMEM;
 		}
 		new_context->id = local_id;
 		context__add_to_by_id(new_context);
 	}
+	db.bridges[slot] = new_context;
 	new_context->bridge = bridge;
 	new_context->is_bridge = true;
 
@@ -135,14 +508,7 @@ int bridge__new(struct mosquitto__bridge *bridge)
 		}
 	}
 
-	bridges = mosquitto__realloc(db.bridges, (size_t)(db.bridge_count+1)*sizeof(struct mosquitto *));
-	if(bridges){
-		db.bridges = bridges;
-		db.bridge_count++;
-		db.bridges[db.bridge_count-1] = new_context;
-	}else{
-		return MOSQ_ERR_NOMEM;
-	}
+	if(context_out) *context_out = new_context;
 
 #if defined(__GLIBC__) && defined(WITH_ADNS)
 	new_context->bridge->restart_t = 1; /* force quick restart of bridge */

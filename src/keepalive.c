@@ -120,6 +120,8 @@ int keepalive__add(struct mosquitto *context)
 #ifdef WITH_BRIDGE
 	if(context->bridge) return MOSQ_ERR_SUCCESS;
 #endif
+	/* keepalive__init() failed (out of memory); there is no list to add to. */
+	if(keepalive_list == NULL) return MOSQ_ERR_NOMEM;
 
 	DL_APPEND2(keepalive_list[calc_index(context)], context, keepalive_prev, keepalive_next);
 	context->keepalive_add_time = db.now_s;
@@ -134,6 +136,13 @@ int keepalive__add(struct mosquitto *context)
 void keepalive__check(void)
 {
 	struct mosquitto *context, *ctxt_tmp;
+
+	if(keepalive_list == NULL){
+		/* keepalive__init() failed (out of memory); nothing to check and
+		 * keepalive_list_max is 0. */
+		last_keepalive_check = db.now_s;
+		return;
+	}
 
 	for(time_t i=last_keepalive_check; i<db.now_s; i++){
 		int idx = (int)(i % keepalive_list_max);
@@ -185,6 +194,7 @@ int keepalive__remove(struct mosquitto *context)
 	int idx;
 
 	if(context->keepalive <= 0 || context->keepalive_prev == NULL) return MOSQ_ERR_SUCCESS;
+	if(keepalive_list == NULL) return MOSQ_ERR_SUCCESS;
 
 	idx = calc_index(context);
 	if(keepalive_list[idx]){

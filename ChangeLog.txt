@@ -1,3 +1,13 @@
+2.0.22-marel - 2026-08-26
+=========================
+
+Broker:
+- Bridge: Bridge configuration is now reloaded on SIGHUP. New `connection`
+  blocks are started, removed ones are stopped (and their retained
+  notification state message cleared), and bridges whose options changed
+  are restarted. Unchanged bridges are left running.
+
+
 2.0.22 - 2025-07-11
 ===================
 
