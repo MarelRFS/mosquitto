@@ -863,8 +863,10 @@ struct sub__topic_buffer* sub__build_full_topic(struct mosquitto__subhier *branc
 			return NULL;
 
 		topic_buffer->buffer = malloc(len + my_length);
-		if(topic_buffer->buffer == NULL)
+		if(topic_buffer->buffer == NULL){
+			free(topic_buffer);
 			return NULL;
+		}
 
 		topic_buffer->buffer[0] = '\0';
 		topic_buffer->len = len + my_length;
@@ -897,6 +899,7 @@ int sub__update_subscribed_topics(struct mosquitto__subhier *branch)
 
 	char pub_topic[strlen(pub_topic_prefix) + 1 + strlen(topic_buffer->buffer) + 1 ];
 	snprintf(pub_topic, sizeof(pub_topic), "%s/%s", pub_topic_prefix, topic_buffer->buffer);
+	free(topic_buffer->buffer);
 	free(topic_buffer);
 	int len = snprintf(payload_buf, payload_buf_len, "%u", count);
 	db__messages_easy_queue(NULL, pub_topic, 0, (uint32_t)len, payload_buf, 1, 0, NULL);
