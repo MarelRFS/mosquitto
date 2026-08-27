@@ -1,3 +1,12 @@
+2.0.22-marel - 2026-08-26
+=========================
+
+Broker:
+- Bridge: New `connection` blocks added to the configuration file are now
+  started on reload (SIGHUP). Existing bridges are left untouched; removing
+  or changing a bridge still requires a restart.
+
+
 2.0.22 - 2025-07-11
 ===================
 

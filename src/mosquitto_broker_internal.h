@@ -301,7 +301,7 @@ struct mosquitto__config {
 	uint16_t websockets_headers_size;
 #endif
 #ifdef WITH_BRIDGE
-	struct mosquitto__bridge *bridges;
+	struct mosquitto__bridge **bridges;
 	int bridge_count;
 #endif
 	struct mosquitto__security_options security_options;
@@ -597,6 +597,9 @@ int config__parse_args(struct mosquitto__config *config, int argc, char *argv[])
 int config__read(struct mosquitto__config *config, bool reload);
 /* Free all config data. */
 void config__cleanup(struct mosquitto__config *config);
+#ifdef WITH_BRIDGE
+void config__bridge_free(struct mosquitto__bridge *bridge);
+#endif
 int config__get_dir_files(const char *include_dir, char ***files, int *file_count);
 
 int drop_privileges(struct mosquitto__config *config);
@@ -725,6 +728,7 @@ void log__internal(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  * ============================================================ */
 #ifdef WITH_BRIDGE
 void bridge__start_all(void);
+void bridge__start_new(int first);
 int bridge__new(struct mosquitto__bridge *bridge);
 void bridge__cleanup(struct mosquitto *context);
 int bridge__connect(struct mosquitto *context);

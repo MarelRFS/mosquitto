@@ -1600,7 +1600,12 @@ openssl dhparam -out dhparam.pem 2048</programlisting>
 		<title>Configuring Bridges</title>
 		<para>Multiple bridges (connections to other brokers) can be configured
 		using the following variables.</para>
-		<para>Bridges cannot currently be reloaded on reload signal.</para>
+		<para>On reload signal, bridge connections that have been added to the
+		configuration file since the broker started (or since the last reload)
+		are started. Bridges that already exist are not modified, even if
+		their options have changed, and bridges that have been removed from
+		the configuration file are not stopped. Bridges are matched by their
+		<option>connection</option> name.</para>
 		<variablelist>
 			<varlistentry>
 				<term><option>address</option> <replaceable>address[:port]</replaceable> <replaceable>[address[:port]]</replaceable></term>

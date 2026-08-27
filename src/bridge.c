@@ -62,9 +62,47 @@ void bridge__start_all(void)
 	int i;
 
 	for(i=0; i<db.config->bridge_count; i++){
-		if(bridge__new(&(db.config->bridges[i])) > 0){
+		if(bridge__new(db.config->bridges[i]) > 0){
 			log__printf(NULL, MOSQ_LOG_WARNING, "Warning: Unable to connect to bridge %s.",
-					db.config->bridges[i].name);
+					db.config->bridges[i]->name);
+		}
+	}
+}
+
+
+/* Start bridges that were appended to db.config->bridges by a config reload.
+ * Bridges at index < first are already running and must not be touched. */
+void bridge__start_new(int first)
+{
+	int i;
+	int rc;
+	struct mosquitto *context;
+
+	for(i=first; i<db.config->bridge_count; i++){
+		log__printf(NULL, MOSQ_LOG_INFO, "Starting new bridge connection %s from reloaded config.",
+				db.config->bridges[i]->name);
+		rc = bridge__new(db.config->bridges[i]);
+		if(rc == MOSQ_ERR_NOMEM){
+			log__printf(NULL, MOSQ_LOG_ERR, "Error: Out of memory starting bridge %s.",
+					db.config->bridges[i]->name);
+			continue;
+		}else if(rc > 0){
+			log__printf(NULL, MOSQ_LOG_WARNING, "Warning: Unable to connect to bridge %s.",
+					db.config->bridges[i]->name);
+		}
+		/* bridge__register_local_connections() only runs before the main loop,
+		 * so register the socket with the mux here if a connection is up or
+		 * pending. If not connected, bridge_check() will retry and register. */
+		if(db.bridge_count > 0){
+			context = db.bridges[db.bridge_count-1];
+			if(context && context->bridge == db.config->bridges[i] && context->sock != INVALID_SOCKET){
+				if(mux__add_in(context)){
+					log__printf(NULL, MOSQ_LOG_ERR, "Error registering new bridge %s: %s",
+							db.config->bridges[i]->name, strerror(errno));
+				}else{
+					mux__add_out(context);
+				}
+			}
 		}
 	}
 }
