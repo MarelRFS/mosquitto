@@ -18,6 +18,8 @@ Contributors:
 
 #include "config.h"
 
+#include <string.h>
+
 #include "mosquitto.h"
 #include "mosquitto_broker_internal.h"
 #include "memory_mosq.h"
@@ -129,21 +131,22 @@ int bridge__add_topic(struct mosquitto__bridge *bridge, const char *topic, enum 
 	}
 
 
-	bridge->topic_count++;
 	topics = mosquitto__realloc(bridge->topics,
-				sizeof(struct mosquitto__bridge_topic)*(size_t)bridge->topic_count);
+				sizeof(struct mosquitto__bridge_topic)*(size_t)(bridge->topic_count+1));
 
 	if(topics == NULL){
 		log__printf(NULL, MOSQ_LOG_ERR, "Error: Out of memory.");
 		return MOSQ_ERR_NOMEM;
 	}
 	bridge->topics = topics;
+	bridge->topic_count++;
 
+	/* Fully initialise the new entry before anything below can fail, so a
+	 * partially parsed bridge can always be freed safely. */
 	cur_topic = &bridge->topics[bridge->topic_count-1];
+	memset(cur_topic, 0, sizeof(struct mosquitto__bridge_topic));
 	cur_topic->direction = direction;
 	cur_topic->qos = qos;
-	cur_topic->local_prefix = NULL;
-	cur_topic->remote_prefix = NULL;
 
 	if(topic == NULL || !strcmp(topic, "\"\"")){
 		cur_topic->topic = NULL;

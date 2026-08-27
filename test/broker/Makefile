@@ -126,6 +126,9 @@ msg_sequence_test:
 	./06-bridge-per-listener-settings.py
 	./06-bridge-reconnect-local-out.py
 	./06-bridge-reload-add.py
+	./06-bridge-reload-clientid-clash.py
+	./06-bridge-reload-invalid.py
+	./06-bridge-reload-remove.py
 	./06-bridge-reload-unchanged.py
 	./06-bridge-remap-receive-wildcard.py
 

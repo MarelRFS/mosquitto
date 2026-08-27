@@ -72,7 +72,6 @@ static int config__check(struct mosquitto__config *config);
 #ifdef WITH_BRIDGE
 static int config__check_bridges(struct mosquitto__config *config);
 static int config__validate_bridges(struct mosquitto__config *config);
-static int config__merge_new_bridges(struct mosquitto__config *src, struct mosquitto__config *dest);
 #endif
 static void config__cleanup_plugins(struct mosquitto__config *config);
 
@@ -631,7 +630,7 @@ static int config__validate_bridges(struct mosquitto__config *config)
 			log__printf(NULL, MOSQ_LOG_ERR, "Error: Invalid bridge configuration: bridge name not defined.");
 			return MOSQ_ERR_INVAL;
 		}
-		if(config->bridges[i]->addresses  == 0){
+		if(config->bridges[i]->address_count == 0){
 			log__printf(NULL, MOSQ_LOG_ERR, "Error: Invalid bridge configuration: no remote addresses defined.");
 			return MOSQ_ERR_INVAL;
 		}
@@ -654,51 +653,51 @@ static int config__validate_bridges(struct mosquitto__config *config)
 }
 
 
-/* Add-only bridge reload: append bridges from src that are not already
- * configured in dest (matched by connection name). Bridges already present
- * are left untouched even if their options changed; removed bridges are not
- * stopped. Returns the number of bridges appended, or -1 on error. */
-static int config__merge_new_bridges(struct mosquitto__config *src, struct mosquitto__config *dest)
+/* Grow config->bridges to hold at least capacity entries without changing
+ * bridge_count. Used on reload so that the merge of the new bridge set
+ * cannot fail once running bridges have been torn down. */
+int config__reserve_bridges(struct mosquitto__config *config, int capacity)
 {
-	int i, j;
-	int added = 0;
-	bool skip;
 	struct mosquitto__bridge **bridges;
 
-	for(i=0; i<src->bridge_count; i++){
-		skip = false;
-		for(j=0; j<dest->bridge_count; j++){
-			if(!strcmp(src->bridges[i]->name, dest->bridges[j]->name)){
-				skip = true;
-				break;
-			}
-			if(!strcmp(src->bridges[i]->local_clientid, dest->bridges[j]->local_clientid)){
-				log__printf(NULL, MOSQ_LOG_ERR, "Error: New bridge \"%s\" has local_clientid '%s' which is already used by bridge \"%s\", ignoring.",
-						src->bridges[i]->name, src->bridges[i]->local_clientid, dest->bridges[j]->name);
-				skip = true;
-				break;
-			}
-		}
-		if(skip){
-			config__bridge_free(src->bridges[i]);
-			src->bridges[i] = NULL;
-			continue;
-		}
-		bridges = mosquitto__realloc(dest->bridges, (size_t)(dest->bridge_count+1)*sizeof(struct mosquitto__bridge *));
-		if(!bridges){
-			log__printf(NULL, MOSQ_LOG_ERR, "Error: Out of memory.");
-			return -1;
-		}
-		dest->bridges = bridges;
-		dest->bridges[dest->bridge_count] = src->bridges[i];
-		dest->bridge_count++;
-		src->bridges[i] = NULL;
-		added++;
+	if(capacity <= config->bridge_capacity) return MOSQ_ERR_SUCCESS;
+	bridges = mosquitto__realloc(config->bridges, (size_t)capacity*sizeof(struct mosquitto__bridge *));
+	if(!bridges){
+		log__printf(NULL, MOSQ_LOG_ERR, "Error: Out of memory.");
+		return MOSQ_ERR_NOMEM;
 	}
-	mosquitto__free(src->bridges);
-	src->bridges = NULL;
-	src->bridge_count = 0;
-	return added;
+	config->bridges = bridges;
+	config->bridge_capacity = capacity;
+	return MOSQ_ERR_SUCCESS;
+}
+
+
+/* Remove the bridge config at index from config->bridges without freeing it.
+ * The array is compacted and the vacated tail slot cleared. */
+void config__bridge_remove(struct mosquitto__config *config, int index)
+{
+	int i;
+
+	for(i=index; i<config->bridge_count-1; i++){
+		config->bridges[i] = config->bridges[i+1];
+	}
+	config->bridge_count--;
+	config->bridges[config->bridge_count] = NULL;
+}
+
+
+/* Free every bridge config in config->bridges and the array itself. */
+void config__bridges_free_all(struct mosquitto__config *config)
+{
+	int i;
+
+	for(i=0; i<config->bridge_count; i++){
+		config__bridge_free(config->bridges[i]);
+	}
+	mosquitto__free(config->bridges);
+	config->bridges = NULL;
+	config->bridge_count = 0;
+	config->bridge_capacity = 0;
 }
 #endif
 
@@ -713,9 +712,6 @@ int config__read(struct mosquitto__config *config, bool reload)
 #endif
 	struct mosquitto__config config_reload;
 	int i;
-#ifdef WITH_BRIDGE
-	int first_new_bridge = 0;
-#endif
 
 	if(reload){
 		memset(&config_reload, 0, sizeof(struct mosquitto__config));
@@ -744,10 +740,7 @@ int config__read(struct mosquitto__config *config, bool reload)
 		}
 #ifdef WITH_BRIDGE
 		if(reload){
-			for(i=0; i<config_reload.bridge_count; i++){
-				config__bridge_free(config_reload.bridges[i]);
-			}
-			mosquitto__free(config_reload.bridges);
+			config__bridges_free_all(&config_reload);
 		}
 #endif
 		return rc;
@@ -755,21 +748,20 @@ int config__read(struct mosquitto__config *config, bool reload)
 
 	if(reload){
 #ifdef WITH_BRIDGE
-		/* Validate the freshly parsed bridge set before touching the live one. */
+		/* Validate the freshly parsed bridge set, then let the bridge code
+		 * apply it to the running set. bridge__reload() takes ownership of
+		 * config_reload's bridges on success; on any failure the running set
+		 * is untouched and the parsed bridges are freed here. */
 		rc = config__validate_bridges(&config_reload);
 		if(rc == MOSQ_ERR_SUCCESS){
 			rc = config__check_bridges(&config_reload);
 		}
-		if(rc){
-			for(i=0; i<config_reload.bridge_count; i++){
-				config__bridge_free(config_reload.bridges[i]);
-			}
-			mosquitto__free(config_reload.bridges);
-			return rc;
+		if(rc == MOSQ_ERR_SUCCESS){
+			rc = bridge__reload(&config_reload, config);
 		}
-		first_new_bridge = config->bridge_count;
-		if(config__merge_new_bridges(&config_reload, config) < 0){
-			return MOSQ_ERR_NOMEM;
+		if(rc){
+			config__bridges_free_all(&config_reload);
+			return rc;
 		}
 #endif
 		config__copy(&config_reload, config);
@@ -824,12 +816,6 @@ int config__read(struct mosquitto__config *config, bool reload)
 	if(rc) return rc;
 #endif
 
-#ifdef WITH_BRIDGE
-	if(reload && first_new_bridge < config->bridge_count){
-		bridge__start_new(first_new_bridge);
-	}
-#endif
-
 	if(cr.log_dest_set){
 		config->log_dest = cr.log_dest;
 	}
@@ -852,6 +838,8 @@ static int config__read_file_core(struct mosquitto__config *config, bool reload,
 	char *tmp_char;
 	struct mosquitto__bridge *cur_bridge = NULL;
 	struct mosquitto__bridge **bridges;
+	struct bridge_address *addresses;
+	struct bridge_address *cur_address;
 #endif
 	struct mosquitto__auth_plugin_config *cur_auth_plugin_config = NULL;
 
@@ -904,23 +892,27 @@ static int config__read_file_core(struct mosquitto__config *config, bool reload,
 						if (token[0] == '#'){
 							break;
 						}
-						cur_bridge->address_count++;
-						cur_bridge->addresses = mosquitto__realloc(cur_bridge->addresses, sizeof(struct bridge_address)*(size_t)cur_bridge->address_count);
-						if(!cur_bridge->addresses){
+						/* Every counted entry must be fully initialised and own
+						 * its address string before any error return, so that
+						 * config__bridge_free() can safely free a partially
+						 * parsed bridge (e.g. on config reload). */
+						addresses = mosquitto__realloc(cur_bridge->addresses, sizeof(struct bridge_address)*(size_t)(cur_bridge->address_count+1));
+						if(!addresses){
 							log__printf(NULL, MOSQ_LOG_ERR, "Error: Out of memory.");
 							return MOSQ_ERR_NOMEM;
 						}
-						cur_bridge->addresses[cur_bridge->address_count-1].address = token;
-					}
-					for(i=0; i<cur_bridge->address_count; i++){
-						/* cur_bridge->addresses[i].address is now
-						 * "address[:port]". If address is an IPv6 address,
-						 * then port is required. We must check for the :
-						 * backwards. */
-						tmp_char = strrchr(cur_bridge->addresses[i].address, ':');
+						cur_bridge->addresses = addresses;
+						cur_bridge->address_count++;
+						cur_address = &cur_bridge->addresses[cur_bridge->address_count-1];
+						cur_address->address = NULL;
+						cur_address->port = 1883;
+
+						/* token is "address[:port]". If address is an IPv6
+						 * address, then port is required. We must check for
+						 * the : backwards. */
+						tmp_char = strrchr(token, ':');
 						if(tmp_char){
-							/* Remove ':', so cur_bridge->addresses[i].address
-							 * now just looks like the address. */
+							/* Remove ':', so token now just looks like the address. */
 							tmp_char[0] = '\0';
 
 							/* The remainder of the string */
@@ -929,17 +921,16 @@ static int config__read_file_core(struct mosquitto__config *config, bool reload,
 								log__printf(NULL, MOSQ_LOG_ERR, "Error: Invalid port value (%d).", tmp_int);
 								return MOSQ_ERR_INVAL;
 							}
-							cur_bridge->addresses[i].port = (uint16_t)tmp_int;
-						}else{
-							cur_bridge->addresses[i].port = 1883;
+							cur_address->port = (uint16_t)tmp_int;
 						}
-						/* This looks a bit weird, but isn't. Before this
-						 * call, cur_bridge->addresses[i].address points
-						 * to the tokenised part of the line, it will be
-						 * reused in a future parse of a config line so we
-						 * must duplicate it. */
-						cur_bridge->addresses[i].address = mosquitto__strdup(cur_bridge->addresses[i].address);
-						conf__attempt_resolve(cur_bridge->addresses[i].address, "bridge address", MOSQ_LOG_WARNING, "Warning");
+						/* token points into the tokenised line, which is reused
+						 * for the next config line, so it must be duplicated. */
+						cur_address->address = mosquitto__strdup(token);
+						if(!cur_address->address){
+							log__printf(NULL, MOSQ_LOG_ERR, "Error: Out of memory.");
+							return MOSQ_ERR_NOMEM;
+						}
+						conf__attempt_resolve(cur_address->address, "bridge address", MOSQ_LOG_WARNING, "Warning");
 					}
 					if(cur_bridge->address_count == 0){
 						log__printf(NULL, MOSQ_LOG_ERR, "Error: Empty address value in configuration.");
@@ -1220,10 +1211,13 @@ static int config__read_file_core(struct mosquitto__config *config, bool reload,
 					if(token){
 						if(!strcmp(token, "mqttv31")){
 							cur_bridge->protocol_version = mosq_p_mqtt31;
+							cur_bridge->protocol_version_cfg = mosq_p_mqtt31;
 						}else if(!strcmp(token, "mqttv311")){
 							cur_bridge->protocol_version = mosq_p_mqtt311;
+							cur_bridge->protocol_version_cfg = mosq_p_mqtt311;
 						}else if(!strcmp(token, "mqttv50")){
 							cur_bridge->protocol_version = mosq_p_mqtt5;
+							cur_bridge->protocol_version_cfg = mosq_p_mqtt5;
 						}else{
 							log__printf(NULL, MOSQ_LOG_ERR, "Error: Invalid bridge_protocol_version value (%s).", token);
 							return MOSQ_ERR_INVAL;
@@ -1367,6 +1361,7 @@ static int config__read_file_core(struct mosquitto__config *config, bool reload,
 						}
 						config->bridges = bridges;
 						config->bridge_count++;
+						config->bridge_capacity = config->bridge_count;
 						config->bridges[config->bridge_count-1] = cur_bridge;
 						cur_bridge->name = mosquitto__strdup(token);
 						if(!cur_bridge->name){
@@ -1385,6 +1380,7 @@ static int config__read_file_core(struct mosquitto__config *config, bool reload,
 						cur_bridge->try_private = true;
 						cur_bridge->attempt_unsubscribe = true;
 						cur_bridge->protocol_version = mosq_p_mqtt311;
+						cur_bridge->protocol_version_cfg = mosq_p_mqtt311;
 						cur_bridge->primary_retry_sock = INVALID_SOCKET;
 						cur_bridge->outgoing_retain = true;
 						cur_bridge->clean_start_local = -1;
