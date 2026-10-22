@@ -644,6 +644,10 @@ int config__read(struct mosquitto__config *config, bool reload)
 
 	if(reload){
 		config__copy(&config_reload, config);
+	}else if(config->sys_interval == 0){
+		/* sys_subscribed_topics isn't reloaded, so whether it is in effect is
+		 * decided here at startup, rather than following sys_interval. */
+		config->sys_subscribed_topics = false;
 	}
 
 	/* If auth/access options are set and allow_anonymous not explicitly set, disallow anon. */
@@ -1997,6 +2001,9 @@ static int config__read_file_core(struct mosquitto__config *config, bool reload,
 						log__printf(NULL, MOSQ_LOG_ERR, "Error: Invalid sys_interval value (%d).", config->sys_interval);
 						return MOSQ_ERR_INVAL;
 					}
+				}else if(!strcmp(token, "sys_subscribed_topics")){
+					if(reload) continue; /* Not valid for reloading. */
+					if(conf__parse_bool(&token, "sys_subscribed_topics", &config->sys_subscribed_topics, saveptr)) return MOSQ_ERR_INVAL;
 				}else if(!strcmp(token, "threshold")){
 #ifdef WITH_BRIDGE
 					if(reload) continue; /* FIXME */

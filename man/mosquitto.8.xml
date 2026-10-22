@@ -585,6 +585,26 @@
 				</listitem>
 			</varlistentry>
 			<varlistentry>
+				<term><option>$SYS/broker/subscribed_topics/<replaceable>filter</replaceable></option></term>
+				<listitem>
+					<para>The number of clients subscribed to
+						<replaceable>filter</replaceable>, published as a
+						retained message whenever that number changes, including
+						when it drops to 0. Only published if
+						<option>sys_subscribed_topics</option> is set to true
+						and <option>sys_interval</option> is not 0 in the
+						configuration file at startup. The characters
+						<literal>+</literal>, <literal>#</literal> and
+						<literal>%</literal> in the filter are encoded as
+						<literal>%2B</literal>, <literal>%23</literal> and
+						<literal>%25</literal>, because wildcards are not
+						allowed in a topic name. For example, a subscription to
+						<literal>a/+/#</literal> is reported on
+						<literal>$SYS/broker/subscribed_topics/a/%2B/%23</literal>.
+						Shared subscriptions are not included.</para>
+				</listitem>
+			</varlistentry>
+			<varlistentry>
 				<term><option>$SYS/broker/subscriptions/count</option></term>
 				<listitem>
 					<para>The total number of subscriptions active on the broker.</para>

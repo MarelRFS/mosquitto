@@ -199,6 +199,70 @@ static void sub__remove_shared_leaf(struct mosquitto__subhier *subhier, struct m
 }
 
 
+#ifdef WITH_SYS_TREE
+#define SUBSCRIBED_TOPICS_PREFIX "$SYS/broker/subscribed_topics/"
+
+/* Publish the number of clients subscribed to a filter as a retained message
+ * on $SYS/broker/subscribed_topics/<filter>.
+ *
+ * Wildcards aren't allowed in a topic name, so +, # and % in the filter are
+ * percent-encoded as %2B, %23 and %25. */
+static void sub__update_subscribed_topics(const char *filter, const struct mosquitto__subhier *hier)
+{
+	struct mosquitto__subleaf *leaf;
+	char *topic;
+	size_t prefix_len, topic_len, i, pos;
+	char payload[12];
+	int payloadlen;
+	unsigned int count = 0;
+
+	if(!db.config->sys_subscribed_topics) return;
+
+	for(leaf = hier->subs; leaf; leaf = leaf->next){
+		count++;
+	}
+
+	prefix_len = strlen(SUBSCRIBED_TOPICS_PREFIX);
+	topic_len = prefix_len;
+	for(i=0; filter[i]; i++){
+		if(filter[i] == '+' || filter[i] == '#' || filter[i] == '%'){
+			topic_len += 3;
+		}else{
+			topic_len++;
+		}
+	}
+	if(topic_len > UINT16_MAX){
+		/* Too long to be an MQTT topic name. */
+		return;
+	}
+	topic = mosquitto__malloc(topic_len + 1);
+	if(!topic) return;
+	memcpy(topic, SUBSCRIBED_TOPICS_PREFIX, prefix_len);
+	pos = prefix_len;
+	for(i=0; filter[i]; i++){
+		if(filter[i] == '+'){
+			memcpy(&topic[pos], "%2B", 3);
+			pos += 3;
+		}else if(filter[i] == '#'){
+			memcpy(&topic[pos], "%23", 3);
+			pos += 3;
+		}else if(filter[i] == '%'){
+			memcpy(&topic[pos], "%25", 3);
+			pos += 3;
+		}else{
+			topic[pos] = filter[i];
+			pos++;
+		}
+	}
+	topic[pos] = '\0';
+
+	payloadlen = snprintf(payload, sizeof(payload), "%u", count);
+	db__messages_easy_queue(NULL, topic, 0, (uint32_t)payloadlen, payload, 1, 0, NULL);
+	mosquitto__free(topic);
+}
+#endif
+
+
 static int sub__add_shared(struct mosquitto *context, const char *sub, uint8_t qos, uint32_t identifier, int options, struct mosquitto__subhier *subhier, const char *sharename)
 {
 	struct mosquitto__subleaf *newleaf;
@@ -319,7 +383,7 @@ static int sub__add_normal(struct mosquitto *context, const char *sub, uint8_t q
 		}
 #ifdef WITH_SYS_TREE
 		db.subscription_count++;
-		sub__update_subscribed_topics(subhier);
+		sub__update_subscribed_topics(sub, subhier);
 #endif
 	}
 
@@ -388,15 +452,15 @@ static int sub__remove_normal(struct mosquitto *context, struct mosquitto__subhi
 			 * each subleaf. Might be worth considering though. */
 			for(i=0; i<context->sub_count; i++){
 				if(context->subs[i] && context->subs[i]->hier == subhier){
+#ifdef WITH_SYS_TREE
+					sub__update_subscribed_topics(context->subs[i]->topic_filter, subhier);
+#endif
 					mosquitto__free(context->subs[i]);
 					context->subs[i] = NULL;
 					break;
 				}
 			}
 			*reason = 0;
-#ifdef WITH_SYS_TREE
-			sub__update_subscribed_topics(subhier);
-#endif
 			return MOSQ_ERR_SUCCESS;
 		}
 		leaf = leaf->next;
@@ -782,7 +846,7 @@ int sub__clean_session(struct mosquitto *context)
 					DL_DELETE(hier->subs, leaf);
 					mosquitto__free(leaf);
 #ifdef WITH_SYS_TREE
-					sub__update_subscribed_topics(hier);
+					sub__update_subscribed_topics(context->subs[i]->topic_filter, hier);
 #endif
 					break;
 				}
@@ -835,71 +899,4 @@ void sub__tree_print(struct mosquitto__subhier *root, int level)
 
 		sub__tree_print(branch->children, level+1);
 	}
-}
-
-struct sub__topic_buffer {
-	char *buffer;
-	size_t len;
-	size_t pos;
-};
-
-struct sub__topic_buffer* sub__build_full_topic(struct mosquitto__subhier *branch, size_t len) {
-	size_t my_length = branch->topic_len + 1;
-	if(branch->parent && branch->parent->topic_len > 0)
-	{
-		struct sub__topic_buffer* topic_buffer = sub__build_full_topic(branch->parent, len + my_length);
-		if(topic_buffer == NULL)
-			return NULL;
-
-		if (len == 0)
-			snprintf(topic_buffer->buffer + topic_buffer->pos, topic_buffer->len - topic_buffer->pos, "%s", branch->topic);
-		else
-			snprintf(topic_buffer->buffer + topic_buffer->pos, topic_buffer->len - topic_buffer->pos, "%s/", branch->topic);
-		topic_buffer->pos += my_length;
-		return topic_buffer;
-	} else {
-		struct sub__topic_buffer* topic_buffer = malloc(sizeof(struct sub__topic_buffer));
-		if(topic_buffer == NULL)
-			return NULL;
-
-		topic_buffer->buffer = malloc(len + my_length);
-		if(topic_buffer->buffer == NULL)
-			return NULL;
-
-		topic_buffer->buffer[0] = '\0';
-		topic_buffer->len = len + my_length;
-
-		int new_len = snprintf(topic_buffer->buffer, topic_buffer->len, "%s/", branch->topic);
-		topic_buffer->pos = (size_t)new_len;
-		return topic_buffer;
-	}
-}
-
-
-int sub__update_subscribed_topics(struct mosquitto__subhier *branch)
-{
-	struct mosquitto__subleaf *leaf;
-	int count = 0;
-	char* pub_topic_prefix = "$SYS/broker/subscribed_topics";
-	size_t payload_buf_len = 10;
-	char payload_buf[payload_buf_len];
-
-	leaf = branch->subs;
-	while(leaf){
-		count++;
-		leaf = leaf->next;
-	}
-
-	struct sub__topic_buffer* topic_buffer = sub__build_full_topic(branch, 0);
-	if(topic_buffer == NULL){
-		return MOSQ_ERR_NOMEM;
-	}
-
-	char pub_topic[strlen(pub_topic_prefix) + 1 + strlen(topic_buffer->buffer) + 1 ];
-	snprintf(pub_topic, sizeof(pub_topic), "%s/%s", pub_topic_prefix, topic_buffer->buffer);
-	free(topic_buffer);
-	int len = snprintf(payload_buf, payload_buf_len, "%u", count);
-	db__messages_easy_queue(NULL, pub_topic, 0, (uint32_t)len, payload_buf, 1, 0, NULL);
-
-	return MOSQ_ERR_SUCCESS;
 }

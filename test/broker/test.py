@@ -42,6 +42,7 @@ tests = [
     (1, './02-subpub-qos2-receive-maximum-2.py'),
     (1, './02-subpub-qos2.py'),
     (1, './02-subpub-recover-subscriptions.py'),
+    (1, './02-subpub-sys-subscribed-topics.py'),
     (1, './02-subscribe-dollar-v5.py'),
     (1, './02-subscribe-invalid-utf8.py'),
     (1, './02-subscribe-long-topic.py'),

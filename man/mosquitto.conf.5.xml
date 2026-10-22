@@ -1045,6 +1045,38 @@ log_timestamp_format %Y-%m-%dT%H:%M:%S
 				</listitem>
 			</varlistentry>
 			<varlistentry>
+				<term><option>sys_subscribed_topics</option> [ true | false ]</term>
+				<listitem>
+					<para>If set to <replaceable>true</replaceable>, the broker
+						publishes the number of clients subscribed to each
+						topic filter as a retained message on
+						<option>$SYS/broker/subscribed_topics/<replaceable>filter</replaceable></option>,
+						updated whenever a client subscribes or unsubscribes.
+						This lets a publisher find out whether anyone is
+						interested in a topic before publishing to it. See
+						<citerefentry><refentrytitle>mosquitto</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+						for the topic and payload format. Shared subscriptions
+						are not included.</para>
+
+					<para>Any client that can read
+						<option>$SYS/broker/subscribed_topics/#</option> can see
+						the topic filters of every other client, so restrict
+						access to it in your ACLs where that matters. A
+						retained message is kept for every topic filter that
+						has been subscribed to.</para>
+
+					<para>Has no effect if <option>sys_interval</option> is
+						set to 0 when the broker starts. Changing
+						<option>sys_interval</option> on reload does not affect
+						this option. Defaults to
+						<replaceable>false</replaceable>.</para>
+
+					<para>This option applies globally.</para>
+
+					<para>Not reloaded on reload signal.</para>
+				</listitem>
+			</varlistentry>
+			<varlistentry>
 				<term><option>upgrade_outgoing_qos</option> [ true | false ]</term>
 				<listitem>
 					<para>The MQTT specification requires that the QoS of a

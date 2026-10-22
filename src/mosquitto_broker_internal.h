@@ -294,6 +294,7 @@ struct mosquitto__config {
 	int retain_expiry_interval;
 	bool set_tcp_nodelay;
 	int sys_interval;
+	bool sys_subscribed_topics;
 	bool upgrade_outgoing_qos;
 	char *user;
 #ifdef WITH_WEBSOCKETS
@@ -685,7 +686,6 @@ int sub__clean_session(struct mosquitto *context);
 int sub__messages_queue(const char *source_id, const char *topic, uint8_t qos, int retain, struct mosquitto_msg_store **stored);
 int sub__topic_tokenise(const char *subtopic, char **local_sub, char ***topics, const char **sharename);
 void sub__topic_tokens_free(struct sub__token *tokens);
-int sub__update_subscribed_topics(struct mosquitto__subhier *branch);
 
 /* ============================================================
  * Context functions
